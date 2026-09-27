@@ -1,0 +1,1 @@
+"""Purchasable catalog domain."""
