@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.git
+.github
+.gcloudignore
+.venv
+__pycache__
+.pytest_cache
+.ruff_cache
+.mypy_cache
+/tests/
+/supabase/
+/scripts/
+*.pyc
+.DS_Store
+gha-creds-*.json
