@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.preferences import router as preferences_router
 from app.api.wardrobe import router as wardrobe_router
 from app.core.config import Settings
 
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Styley Server", lifespan=lifespan)
 app.include_router(wardrobe_router)
+app.include_router(preferences_router)
 
 
 @app.middleware("http")
@@ -42,6 +44,7 @@ async def http_error(request: Request, error: HTTPException) -> JSONResponse:
     codes = {
         401: "unauthorized",
         404: "not_found",
+        409: "conflict",
         413: "file_too_large",
         415: "unsupported_media",
         422: "invalid_input",

@@ -4,7 +4,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 
-class GarmentMetadata(BaseModel):
+class GarmentLabels(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     brand: str = Field(default="", max_length=120)
     category: str = Field(default="", max_length=80)
@@ -12,6 +12,15 @@ class GarmentMetadata(BaseModel):
     color: str = Field(default="", max_length=80)
     season: str = Field(default="", max_length=80)
     tags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class GarmentMetadata(GarmentLabels):
+    hebrew: GarmentLabels | None = None
+    length: Literal["", "short", "regular", "long"] = ""
+
+
+class FavoriteUpdate(BaseModel):
+    is_favorite: bool
 
 
 class Candidate(GarmentMetadata):
@@ -37,6 +46,7 @@ class UpdateItem(GarmentMetadata):
 
 
 class WardrobeItem(GarmentMetadata):
+    is_favorite: bool = False
     id: str
     image_url: str | None = None
     source: Literal["photo", "video"]

@@ -9,11 +9,15 @@ from uuid import uuid4
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 
-from app.domains.wardrobe.schemas import Candidate
+from app.domains.wardrobe.schemas import Candidate, GarmentLabels
 from app.integrations.ai.bria import Bria
 from app.integrations.ai.gemini import Gemini
 
 register_heif_opener()
+
+
+class CatalogImageError(Exception):
+    """A detected garment could not be turned into a catalog image."""
 
 
 def _jpeg(image: Image.Image) -> bytes:
@@ -98,8 +102,8 @@ async def analyze(
     *,
     is_video: bool,
     ffmpeg_binary: str,
-    bria: Bria,
     gemini: Gemini,
+    background_remover: Bria | None = None,
 ) -> list[Candidate]:
     frames = await asyncio.to_thread(_frames, content, is_video, ffmpeg_binary)
     candidates: list[Candidate] = []
@@ -126,32 +130,48 @@ async def analyze(
                 continue
             seen.append((signature, fingerprint))
             crop_bytes = _jpeg(crop)
-            worn = detected.get("worn") is True
             try:
-                if worn:
-                    cleaned = await gemini.isolate_worn_garment(crop_bytes, name or "garment")
-                    mime = "image/png"  # Gemini may return PNG; normalize below.
-                else:
-                    cleaned = await bria.remove_background(crop_bytes)
-                    mime = "image/png"
+                cleaned = await gemini.create_catalog_image(crop_bytes, name or "garment")
+                if background_remover is not None:
+                    cleaned = await background_remover.remove_background(cleaned)
+                mime = "image/png"
                 clean_image = Image.open(io.BytesIO(cleaned)).convert("RGBA")
                 clean_image.thumbnail((1024, 1024))
                 output = io.BytesIO()
                 clean_image.save(output, format="PNG", optimize=True)
                 preview = output.getvalue()
                 if len(preview) > 2_800_000:
-                    flattened = Image.new("RGB", clean_image.size, "white")
-                    flattened.paste(clean_image, mask=clean_image.getchannel("A"))
-                    preview, mime = _jpeg(flattened), "image/jpeg"
-            except Exception:
-                # A failed enhancement must still leave an editable, reviewable crop.
-                preview, mime = crop_bytes, "image/jpeg"
+                    clean_image.thumbnail((768, 768))
+                    output = io.BytesIO()
+                    clean_image.save(output, format="PNG", optimize=True)
+                    preview = output.getvalue()
+                    if len(preview) > 2_800_000:
+                        raise ValueError("Catalog cutout exceeds preview limit")
+            except Exception as error:
+                # Review must never silently substitute the original photographed crop.
+                raise CatalogImageError("Catalog image generation failed") from error
             raw_tags = detected.get("tags")
             tags = (
                 [_label(tag, 40) for tag in raw_tags[:5] if _label(tag, 40)]
                 if isinstance(raw_tags, list)
                 else []
             )
+            raw_hebrew = detected.get("hebrew")
+            hebrew = None
+            if isinstance(raw_hebrew, dict) and _label(raw_hebrew.get("name"), 120):
+                hebrew = GarmentLabels(
+                    name=_label(raw_hebrew.get("name"), 120),
+                    category=_label(raw_hebrew.get("category")),
+                    type=_label(raw_hebrew.get("type")),
+                    color=_label(raw_hebrew.get("color")),
+                    season=_label(raw_hebrew.get("season")),
+                    tags=[
+                        _label(tag, 40) for tag in raw_hebrew.get("tags", [])[:5] if _label(tag, 40)
+                    ]
+                    if isinstance(raw_hebrew.get("tags"), list)
+                    else [],
+                )
+            length = detected.get("length")
             candidates.append(
                 Candidate(
                     id=str(uuid4()),
@@ -161,6 +181,8 @@ async def analyze(
                     color=color,
                     season=_label(detected.get("season")),
                     tags=tags,
+                    hebrew=hebrew,
+                    length=length if length in ("short", "regular", "long") else "",
                     image_base64=base64.b64encode(preview).decode(),
                     image_mime=mime,
                     source="video" if is_video else "photo",

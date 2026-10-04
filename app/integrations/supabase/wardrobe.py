@@ -1,5 +1,6 @@
 import base64
 import io
+import logging
 
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -53,6 +54,9 @@ class SupabaseWardrobe:
             color=row.get("color") or "",
             season=row.get("season") or "",
             tags=row.get("tags") or [],
+            hebrew=row.get("hebrew"),
+            length=row.get("length") or "",
+            is_favorite=row.get("is_favorite", False),
             image_url=await self._signed_url(row["image_path"]),
             source=row["source"],
         )
@@ -157,9 +161,46 @@ class SupabaseWardrobe:
             f"{self.settings.supabase_url}/rest/v1/wardrobe_items",
             headers={**self._headers, "Prefer": "return=representation"},
             params={"id": f"eq.{item_id}", "user_id": f"eq.{user_id}"},
-            json=item.model_dump(),
+            json=item.model_dump(exclude_unset=True),
             timeout=15,
         )
         response.raise_for_status()
         rows = response.json()
         return await self._item(rows[0]) if rows else None
+
+    async def favorite(self, user_id: str, item_id: str, value: bool) -> WardrobeItem | None:
+        response = await self.client.patch(
+            f"{self.settings.supabase_url}/rest/v1/wardrobe_items",
+            headers={**self._headers, "Prefer": "return=representation"},
+            params={"id": f"eq.{item_id}", "user_id": f"eq.{user_id}"},
+            json={"is_favorite": value},
+            timeout=15,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        return await self._item(rows[0]) if rows else None
+
+    async def delete(self, user_id: str, item_id: str) -> bool:
+        response = await self.client.delete(
+            f"{self.settings.supabase_url}/rest/v1/wardrobe_items",
+            headers={**self._headers, "Prefer": "return=representation"},
+            params={"id": f"eq.{item_id}", "user_id": f"eq.{user_id}"},
+            timeout=15,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not rows:
+            return False
+        # The item is deleted even if private storage cleanup needs later reconciliation.
+        try:
+            cleanup = await self.client.request(
+                "DELETE",
+                f"{self.settings.supabase_url}/storage/v1/object/wardrobe-items",
+                headers=self._headers,
+                json={"prefixes": [rows[0]["image_path"]]},
+                timeout=15,
+            )
+            cleanup.raise_for_status()
+        except httpx.HTTPError:
+            logging.getLogger(__name__).warning("Wardrobe image cleanup failed after deletion")
+        return True

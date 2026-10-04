@@ -60,8 +60,6 @@ def _url(value: object, host: str) -> bool:
 
 
 def _small_jpeg(image: bytes) -> bytes:
-    if len(image) <= 256_000:
-        return image
     garment = Image.open(io.BytesIO(image)).convert("RGB")
     for edge in (1024, 768, 512):
         garment.thumbnail((edge, edge))
