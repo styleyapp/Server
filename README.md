@@ -49,7 +49,7 @@ Cloud Run supplies Google credentials to the service account automatically. Neve
 
 ### Bilingual metadata and favorites rollout
 
-Apply `supabase/migrations/20261001124240_wardrobe_localization_and_favorites.sql` before deploying the Server, then ship the App. The migration adds nullable `hebrew` labels, canonical `length` (`short`, `regular`, `long`, or unknown empty string), and `is_favorite` (default false); existing owner RLS policies remain in force. `hebrew` has the same label fields as English metadata. Both languages survive analyze, review, save, list, and edit. Older items without Hebrew labels fall back to their existing metadata; this migration does not translate or regenerate previously saved images. New scans require the existing `REPLICATE_API_TOKEN` configuration for transparent cutouts.
+The migration `supabase/migrations/20261004053958_wardrobe_localization_and_favorites.sql` was applied to the Styley project on October 4, 2026. The database is ready for the current Server; deploy the Server, then ship the App. The migration adds nullable `hebrew` labels, canonical `length` (`short`, `regular`, `long`, or unknown empty string), and `is_favorite` (default false); existing owner RLS policies remain in force. `hebrew` has the same label fields as English metadata. Both languages survive analyze, review, save, list, and edit. Older items without Hebrew labels fall back to their existing metadata; this migration does not translate or regenerate previously saved images. New scans require the existing `REPLICATE_API_TOKEN` configuration for transparent cutouts.
 
 Deletion commits the owned row before storage cleanup. If private storage cleanup fails, the API still reports the completed item deletion and logs a generic warning; orphaned images require storage reconciliation. No signed URLs or image paths are logged.
 
@@ -76,11 +76,10 @@ The client must never automatically overwrite with a freshly fetched revision.
 
 The migration `supabase/migrations/20261004053017_user_preferences.sql` was
 applied to the Styley project on October 4, 2026. Deploy this Server, then
-rebuild the App. The earlier wardrobe localization/favorites migration remains
-pending and is required before deploying this Server. Preferences add one
+rebuild the App. Both preferences and wardrobe localization/favorites migrations
+are applied; Server deployment and the App release remain pending. Preferences add one
 owner-scoped table, explicit client read-only grants, Server write grants,
-validation constraints, and a
-changed-at trigger. Account deletion cascades to preferences. Existing wardrobe
+validation constraints, and a changed-at trigger. Account deletion cascades to preferences. Existing wardrobe
 contracts remain compatible. Rollback can remove the new routes from the App
 and Server while retaining the additive table; avoid dropping user data.
 
@@ -94,3 +93,23 @@ psql "$TEST_DATABASE_URL" --set=ON_ERROR_STOP=1 --file=supabase/tests/user_prefe
 
 Fixtures roll back. Adapter and API behavior are covered by
 `tests/test_preferences.py`, including race conditions and lost-response retries.
+
+
+### Wardrobe migration verification
+
+`supabase/tests/wardrobe_localization_and_favorites.sql` covers legacy insert
+defaults, bilingual metadata, favorites, valid/invalid lengths and translations,
+owner/non-owner/anonymous isolation, ownership reassignment denial, and Server
+access. Run only on a fresh isolated database with both wardrobe migrations
+applied; fixed fixtures and all writes roll back:
+
+```sh
+psql "$TEST_DATABASE_URL" --set=ON_ERROR_STOP=1 --file=supabase/tests/wardrobe_localization_and_favorites.sql
+```
+
+The migration was also verified after preferences on an isolated database with
+an existing garment. Live verification confirmed the three existing wardrobe
+items, their original fields, preferences data, policies, and grants were
+unchanged. New fields received the expected defaults, and live reads were
+checked as owner, unrelated account, and anonymous without changing user data.
+Migration filenames match the versions recorded in the Styley database.
