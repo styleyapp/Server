@@ -1,11 +1,11 @@
 # Styley Server
 
-FastAPI backend for Styley's wardrobe intake. The App sends a photo or short video to `POST /v1/wardrobe/analyze`, reviews the detected pieces, then saves selected pieces with `POST /v1/wardrobe/items`. Saved items are private in Supabase Storage and owned by the signed-in user in Postgres.
+FastAPI backend for Styley's wardrobe intake, account preferences, and owned outfits. The App sends a photo or short video to `POST /v1/wardrobe/analyze`, reviews the detected pieces, then saves selected pieces with `POST /v1/wardrobe/items`. Saved items are private in Supabase Storage and owned by the signed-in user in Postgres.
 
 ## Local setup
 
 1. Install Python 3.12, FFmpeg, and the dependencies in `pyproject.toml`.
-2. Apply `supabase/migrations/20260929181933_wardrobe_items.sql` to a new Supabase project. It was applied to the Styley project on September 29, 2026.
+2. Apply all files in `supabase/migrations/` in version order to a new Supabase project. The Styley project has these migrations applied, including persistent outfits on October 4, 2026.
 3. Complete the ignored local `.env` file using `.env.example` as a guide. The server loads this file at startup, while deployment environment variables take precedence. Set `GOOGLE_CLOUD_PROJECT` to the Cloud project ID with the active credit and enable the Vertex AI API there. Keep the Supabase secret and Replicate token on this server only.
 4. Provide Google Cloud Application Default Credentials: use `gcloud auth application-default login` for local development, or attach a service account with Vertex AI access to the deployed server. No Gemini API key is used.
 5. Run `uvicorn app.main:app --reload` and configure the App's `SERVER_URL` with an HTTPS address reachable by the device.
@@ -18,7 +18,7 @@ Ximilar is no longer part of the wardrobe intake path. Google Cloud Application 
 
 ## API contract
 
-All wardrobe routes require `Authorization: Bearer <Supabase access token>`. The server checks each token with Supabase Auth. The API never accepts a user ID from the App.
+All wardrobe, preferences, and outfit routes require `Authorization: Bearer <Supabase access token>`. The server checks each token with Supabase Auth. The API never accepts a user ID from the App.
 
 | Route | Body | Result |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ Cloud Run supplies Google credentials to the service account automatically. Neve
 
 ### Bilingual metadata and favorites rollout
 
-The migration `supabase/migrations/20261004053958_wardrobe_localization_and_favorites.sql` was applied to the Styley project on October 4, 2026. The database is ready for the current Server; deploy the Server, then ship the App. The migration adds nullable `hebrew` labels, canonical `length` (`short`, `regular`, `long`, or unknown empty string), and `is_favorite` (default false); existing owner RLS policies remain in force. `hebrew` has the same label fields as English metadata. Both languages survive analyze, review, save, list, and edit. Older items without Hebrew labels fall back to their existing metadata; this migration does not translate or regenerate previously saved images. New scans require the existing `REPLICATE_API_TOKEN` configuration for transparent cutouts.
+The migration `supabase/migrations/20261004053958_wardrobe_localization_and_favorites.sql` was applied to the Styley project on October 4, 2026. The deployed wardrobe Server was verified on October 4; ship the updated App after verifying native device behavior. The migration adds nullable `hebrew` labels, canonical `length` (`short`, `regular`, `long`, or unknown empty string), and `is_favorite` (default false); existing owner RLS policies remain in force. `hebrew` has the same label fields as English metadata. Both languages survive analyze, review, save, list, and edit. Older items without Hebrew labels fall back to their existing metadata; this migration does not translate or regenerate previously saved images. New scans require the existing `REPLICATE_API_TOKEN` configuration for transparent cutouts.
 
 Deletion commits the owned row before storage cleanup. If private storage cleanup fails, the API still reports the completed item deletion and logs a generic warning; orphaned images require storage reconciliation. No signed URLs or image paths are logged.
 
@@ -75,9 +75,9 @@ with error code `conflict`; consumers must reload and let the user edit again.
 The client must never automatically overwrite with a freshly fetched revision.
 
 The migration `supabase/migrations/20261004053017_user_preferences.sql` was
-applied to the Styley project on October 4, 2026. Deploy this Server, then
-rebuild the App. Both preferences and wardrobe localization/favorites migrations
-are applied; Server deployment and the App release remain pending. Preferences add one
+applied to the Styley project on October 4, 2026. The deployed preferences routes passed live authenticated verification on
+October 4. Both preferences and wardrobe localization/favorites migrations
+are applied; the App release and native-device verification remain pending. Preferences add one
 owner-scoped table, explicit client read-only grants, Server write grants,
 validation constraints, and a changed-at trigger. Account deletion cascades to preferences. Existing wardrobe
 contracts remain compatible. Rollback can remove the new routes from the App
@@ -113,3 +113,65 @@ items, their original fields, preferences data, policies, and grants were
 unchanged. New fields received the expected defaults, and live reads were
 checked as owner, unrelated account, and anonymous without changing user data.
 Migration filenames match the versions recorded in the Styley database.
+
+
+### Persistent owned outfits
+
+The additive migration `supabase/migrations/20261004063336_persistent_outfits.sql`
+is applied to Styley. New outfit code must be deployed before shipping the App.
+The old wardrobe and preferences contracts remain compatible. Rolling back the
+new API/App code can retain the additive tables; do not drop saved user data.
+
+| Route | Body | Result |
+| --- | --- | --- |
+| `POST /v1/outfits/generate` | `request_id` UUID, `context` with occasion/mood (1–80 characters) and notes (up to 500) | persisted bilingual outfit with 1–6 owned garment references |
+| `GET /v1/outfits` | `limit` 1–50, default 20; optional opaque `cursor` | saved `items` and `next_cursor` using stable saved-time/ID ordering |
+| `GET /v1/outfits/{id}` | none | current owned garment data plus historical snapshots; other owners receive 404 |
+| `PUT /v1/outfits/{id}/save` | none | idempotently saved outfit; refuses first save if any source garment was deleted |
+
+Generation uses up to 100 recent/favorite owned items, with bounded metadata,
+and top/pants fit preferences. Source photos, signed URLs, age, and closet
+categories are not sent to this call. Gemini 2.5 Flash returns structured
+English/Hebrew titles, explanations, and owned IDs. The Server validates known
+garment roles and requires a top/bottom pair or one-piece outfit. Incomplete
+closets return `422 insufficient_wardrobe`, never fabricated pieces.
+
+Generation version `outfit-v1` is recorded. The request ID and normalized
+context form the replay contract: identical completed requests return the
+stored result without AI; changed context returns `409 conflict`. Database
+locks enforce one active generation per account, ten new requests per hour,
+and at most three attempts per request. Each worker receives a 90-second lease;
+expired workers cannot overwrite a recovered request. Model work is bounded
+by a 35-second budget, with bounded network and credential requests.
+
+Safe failure codes include `generation_in_progress`, `rate_limited`,
+`wardrobe_changed`, and `provider_unavailable`. Responses use the existing safe
+error envelope and trace IDs. Provider payloads and private metadata are not
+logged. Save checks ownership and source existence atomically; lost-response
+retries preserve the original save time. Saved outfits use current garment
+metadata and images, with original snapshots and unavailable markers after
+deletion. Outfits cascade on account deletion. Clients have owner-only SELECT
+access and cannot mutate outfit tables or execute the write RPCs.
+
+Outfit image URLs are batch signed for one hour. Refresh collection/detail
+reads to renew them; image signing outages preserve metadata and use placeholders.
+Unsaved generation cleanup, cross-restart draft recovery, broader wardrobe
+selection/pagination, and quotas for scan calls remain production-readiness work.
+
+`supabase/tests/outfits.sql` tests migration constraints, leases, quotas,
+idempotency, garment deletion, owner isolation, denied client writes/RPCs, and
+account deletion. Run only against a fresh isolated migrated database; fixtures
+roll back. Backend tests include safe model contracts and mocked failure cases.
+
+```sh
+psql "$TEST_DATABASE_URL" --set=ON_ERROR_STOP=1 --file=supabase/tests/outfits.sql
+PYTHONPATH=. python scripts/evaluate_outfits.py --live
+```
+
+The evaluation is opt-in and makes four billed Vertex AI calls against
+synthetic casual separates, a single dress, an incomplete closet, and hostile
+metadata. It does not write to the database. All four passed on October 4.
+New local API endpoints also passed against live Supabase/Vertex AI using two
+disposable accounts: replay/conflicts, saves, pagination, account isolation,
+edits, and deletion races. All fixtures were removed. These checks do not
+replace deployed-route verification or controlled-beta fashion-quality review.

@@ -6,9 +6,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.outfits import router as outfits_router
 from app.api.preferences import router as preferences_router
 from app.api.wardrobe import router as wardrobe_router
 from app.core.config import Settings
+from app.domains.outfits.schemas import OutfitFailure
 
 
 @asynccontextmanager
@@ -22,6 +24,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Styley Server", lifespan=lifespan)
 app.include_router(wardrobe_router)
 app.include_router(preferences_router)
+app.include_router(outfits_router)
 
 
 @app.middleware("http")
@@ -71,3 +74,24 @@ async def unexpected_error(request: Request, _error_value: Exception) -> JSONRes
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.exception_handler(OutfitFailure)
+async def outfit_error(request: Request, error: OutfitFailure) -> JSONResponse:
+    messages = {
+        "conflict": (409, "This request was already used for different choices"),
+        "generation_in_progress": (409, "An outfit is still being prepared; try again shortly"),
+        "rate_limited": (429, "Please wait before creating another outfit"),
+        "insufficient_wardrobe": (422, "Add a top and bottom, or a one-piece garment"),
+        "wardrobe_changed": (409, "Some garments are no longer available; create another outfit"),
+        "not_found": (404, "Outfit not found"),
+        "invalid_cursor": (422, "Restart the saved outfit list"),
+        "invalid_proposal": (502, "An outfit could not be prepared; please try again"),
+        "provider_unavailable": (502, "Outfit generation is temporarily unavailable"),
+    }
+    status, message = messages.get(
+        error.code, (502, "Outfit generation is temporarily unavailable")
+    )
+    return _error(
+        request, error.code if error.code in messages else "provider_unavailable", message, status
+    )
