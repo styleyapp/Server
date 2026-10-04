@@ -25,6 +25,11 @@ def test_garment_detection_uses_structured_vertex_output() -> None:
         body = json.loads(request.content)
         assert request.url.path.endswith("models/gemini-2.5-flash:generateContent")
         assert body["generationConfig"]["responseMimeType"] == "application/json"
+        schema = body["generationConfig"]["responseSchema"]["properties"]["items"]["items"]
+        assert "hebrew" in schema["required"]
+        assert "tags" in schema["properties"]["hebrew"]["required"]
+        assert "length" in schema["required"]
+        assert "natural Hebrew" in body["contents"][0]["parts"][0]["text"]
         assert body["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
         assert (
             body["contents"][0]["parts"][1]["inlineData"]["data"]
@@ -68,7 +73,7 @@ def test_garment_detection_rejects_malformed_provider_output() -> None:
         asyncio.run(run())
 
 
-def test_worn_garment_uses_vertex_ai_with_cloud_credentials() -> None:
+def test_catalog_garment_uses_vertex_ai_with_cloud_credentials() -> None:
     edited = b"edited-image"
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -85,6 +90,12 @@ def test_worn_garment_uses_vertex_ai_with_cloud_credentials() -> None:
         }
         assert body["generationConfig"]["responseModalities"] == ["TEXT", "IMAGE"]
         assert body["generationConfig"]["imageConfig"]["imageSize"] == "1K"
+        assert body["generationConfig"]["imageConfig"]["aspectRatio"] == "1:1"
+        prompt = body["contents"][0]["parts"][0]["text"]
+        assert "front facing, upright, centered" in prompt
+        assert "quilting or pleats" in prompt
+        assert "logos, lettering" in prompt
+        assert "pure white background" in prompt
         return httpx.Response(
             200,
             json={
@@ -108,6 +119,6 @@ def test_worn_garment_uses_vertex_ai_with_cloud_credentials() -> None:
                 "styley-project",
                 credentials_factory=lambda: Credentials(token="test-token"),
             )
-            return await gemini.isolate_worn_garment(b"source", "hoodie")
+            return await gemini.create_catalog_image(b"source", "hoodie")
 
     assert asyncio.run(run()) == edited

@@ -2,38 +2,22 @@ import subprocess
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from google.auth.exceptions import GoogleAuthError
 
-from app.domains.wardrobe.intake import analyze
-from app.domains.wardrobe.schemas import AnalysisResponse, CreateItem, UpdateItem, WardrobeItem
+from app.api.dependencies import Owner, Repository, owner, repository  # noqa: F401
+from app.domains.wardrobe.intake import CatalogImageError, analyze
+from app.domains.wardrobe.schemas import (
+    AnalysisResponse,
+    CreateItem,
+    FavoriteUpdate,
+    UpdateItem,
+    WardrobeItem,
+)
 from app.integrations.ai.bria import Bria
 from app.integrations.ai.gemini import Gemini
-from app.integrations.supabase.wardrobe import SupabaseWardrobe
 
 router = APIRouter(prefix="/v1/wardrobe", tags=["wardrobe"])
-
-
-def repository(request: Request) -> SupabaseWardrobe:
-    return SupabaseWardrobe(request.app.state.http, request.app.state.settings)
-
-
-Repository = Annotated[SupabaseWardrobe, Depends(repository)]
-
-
-async def owner(
-    repo: Repository,
-    authorization: Annotated[str | None, Header()] = None,
-) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Sign in required")
-    user_id = await repo.user_id(authorization[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Session expired")
-    return user_id
-
-
-Owner = Annotated[str, Depends(owner)]
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
@@ -64,16 +48,16 @@ async def analyze_media(
             content,
             is_video=video,
             ffmpeg_binary=settings.ffmpeg_binary,
-            bria=Bria(client, settings.replicate_api_token),
             gemini=Gemini(
                 client,
                 settings.google_cloud_project,
                 settings.google_cloud_location,
             ),
+            background_remover=Bria(client, settings.replicate_api_token),
         )
     except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         raise HTTPException(status_code=422, detail="This media could not be read") from error
-    except (httpx.HTTPError, GoogleAuthError) as error:
+    except (httpx.HTTPError, GoogleAuthError, CatalogImageError) as error:
         raise HTTPException(
             status_code=502, detail="Clothing analysis is temporarily unavailable"
         ) from error
@@ -108,3 +92,20 @@ async def update_item(
     if updated is None:
         raise HTTPException(status_code=404, detail="Item not found")
     return updated
+
+
+@router.patch("/items/{item_id}/favorite", response_model=WardrobeItem)
+async def favorite_item(
+    item_id: str, item: FavoriteUpdate, user_id: Owner, repo: Repository
+) -> WardrobeItem:
+    updated = await repo.favorite(user_id, item_id, item.is_favorite)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return updated
+
+
+@router.delete("/items/{item_id}", status_code=204)
+async def delete_item(item_id: str, user_id: Owner, repo: Repository) -> Response:
+    # Idempotent: retries after a lost response are successful too.
+    await repo.delete(user_id, item_id)
+    return Response(status_code=204)

@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import io
 
+import httpx
+import pytest
 from PIL import Image
 
-from app.domains.wardrobe.intake import analyze
+from app.domains.wardrobe.intake import CatalogImageError, analyze
 
 
 class FakeGemini:
@@ -20,26 +23,24 @@ class FakeGemini:
                 "color": "Blue",
                 "season": "Winter",
                 "tags": ["Casual"],
+                "length": "regular",
+                "hebrew": {
+                    "name": "קפוצ׳ון כחול",
+                    "category": "חלק עליון",
+                    "type": "קפוצ׳ון",
+                    "color": "כחול",
+                    "season": "חורף",
+                    "tags": ["יומיומי"],
+                },
                 "worn": self.worn,
             },
             {"box_2d": [0, 0, 10, 10], "name": "noise"},
         ]
 
-    async def isolate_worn_garment(self, image: bytes, name: str) -> bytes:
-        assert self.worn and name == "Blue hoodie"
+    async def create_catalog_image(self, image: bytes, name: str) -> bytes:
+        assert name == "Blue hoodie"
         output = io.BytesIO()
-        Image.new("RGB", (100, 100), "blue").save(output, format="PNG")
-        return output.getvalue()
-
-
-class FakeBria:
-    def __init__(self, allowed: bool = True) -> None:
-        self.allowed = allowed
-
-    async def remove_background(self, image: bytes) -> bytes:
-        assert self.allowed
-        output = io.BytesIO()
-        Image.open(io.BytesIO(image)).save(output, format="PNG")
+        Image.new("RGB", (100, 100), "red").save(output, format="PNG")
         return output.getvalue()
 
 
@@ -49,16 +50,17 @@ def _source() -> bytes:
     return source.getvalue()
 
 
-def test_flat_garment_becomes_reviewable_candidate() -> None:
+def test_flat_garment_returns_generated_catalog_image() -> None:
     candidates = asyncio.run(
-        analyze(
-            _source(), is_video=False, ffmpeg_binary="ffmpeg", bria=FakeBria(), gemini=FakeGemini()
-        )
+        analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=FakeGemini())
     )
     assert len(candidates) == 1
     assert candidates[0].name == "Blue hoodie"
     assert candidates[0].category == "Tops"
     assert candidates[0].tags == ["Casual"]
+    assert candidates[0].hebrew.name == "קפוצ׳ון כחול"
+    assert candidates[0].hebrew.tags == ["יומיומי"]
+    assert candidates[0].length == "regular"
     assert candidates[0].image_mime == "image/png"
 
 
@@ -68,9 +70,83 @@ def test_worn_garment_uses_gemini_image_editing() -> None:
             _source(),
             is_video=False,
             ffmpeg_binary="ffmpeg",
-            bria=FakeBria(allowed=False),
             gemini=FakeGemini(worn=True),
         )
     )
     assert len(candidates) == 1
     assert candidates[0].image_mime == "image/png"
+
+
+@pytest.mark.parametrize("worn", [False, True])
+def test_review_image_is_generated_rather_than_the_source_crop(worn: bool) -> None:
+    candidates = asyncio.run(
+        analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=FakeGemini(worn))
+    )
+    preview = Image.open(io.BytesIO(base64.b64decode(candidates[0].image_base64)))
+    assert preview.size == (100, 100)
+    assert preview.getpixel((50, 50)) == (255, 0, 0, 255)
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("timeout"), ValueError("no image")])
+def test_generation_failure_does_not_return_a_photographed_crop(failure: Exception) -> None:
+    class FailedGemini(FakeGemini):
+        async def create_catalog_image(self, image: bytes, name: str) -> bytes:
+            raise failure
+
+    with pytest.raises(CatalogImageError):
+        asyncio.run(
+            analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=FailedGemini())
+        )
+
+
+def test_invalid_generated_image_does_not_return_a_photographed_crop() -> None:
+    class InvalidGemini(FakeGemini):
+        async def create_catalog_image(self, image: bytes, name: str) -> bytes:
+            return b"not an image"
+
+    with pytest.raises(CatalogImageError):
+        asyncio.run(
+            analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=InvalidGemini())
+        )
+
+
+def test_catalog_cutout_keeps_transparency_through_review() -> None:
+    class Remover:
+        async def remove_background(self, image: bytes) -> bytes:
+            generated = Image.open(io.BytesIO(image))
+            assert generated.getpixel((50, 50))[:3] == (255, 0, 0)
+            cutout = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+            cutout.putpixel((50, 50), (255, 255, 255, 255))
+            output = io.BytesIO()
+            cutout.save(output, format="PNG")
+            return output.getvalue()
+
+    candidates = asyncio.run(
+        analyze(
+            _source(),
+            is_video=False,
+            ffmpeg_binary="ffmpeg",
+            gemini=FakeGemini(),
+            background_remover=Remover(),
+        )
+    )
+    preview = Image.open(io.BytesIO(base64.b64decode(candidates[0].image_base64)))
+    assert preview.getpixel((0, 0))[3] == 0
+    assert preview.getpixel((50, 50)) == (255, 255, 255, 255)
+
+
+def test_failed_background_removal_returns_no_white_preview() -> None:
+    class Remover:
+        async def remove_background(self, image: bytes) -> bytes:
+            raise ValueError("provider failure")
+
+    with pytest.raises(CatalogImageError):
+        asyncio.run(
+            analyze(
+                _source(),
+                is_video=False,
+                ffmpeg_binary="ffmpeg",
+                gemini=FakeGemini(),
+                background_remover=Remover(),
+            )
+        )

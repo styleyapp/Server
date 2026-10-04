@@ -21,6 +21,9 @@ dependencies = [
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
 
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "ruff==0.16.9"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
