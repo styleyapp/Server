@@ -118,8 +118,9 @@ Migration filenames match the versions recorded in the Styley database.
 ### Persistent owned outfits
 
 The additive migration `supabase/migrations/20261004063336_persistent_outfits.sql`
-is applied to Styley. New outfit code must be deployed before shipping the App.
-The old wardrobe and preferences contracts remain compatible. Rolling back the
+is applied to Styley. Outfit code is deployed and passed authenticated live
+verification on October 4, 2026. The updated App still needs native-device
+verification before release. The old wardrobe and preferences contracts remain compatible. Rolling back the
 new API/App code can retain the additive tables; do not drop saved user data.
 
 | Route | Body | Result |
@@ -171,7 +172,7 @@ PYTHONPATH=. python scripts/evaluate_outfits.py --live
 The evaluation is opt-in and makes four billed Vertex AI calls against
 synthetic casual separates, a single dress, an incomplete closet, and hostile
 metadata. It does not write to the database. All four passed on October 4.
-New local API endpoints also passed against live Supabase/Vertex AI using two
+Deployed Cloud Run API endpoints also passed against live Supabase/Vertex AI using two
 disposable accounts: replay/conflicts, saves, pagination, account isolation,
 edits, and deletion races. All fixtures were removed. These checks do not
-replace deployed-route verification or controlled-beta fashion-quality review.
+replace native-device verification or controlled-beta fashion-quality review.
