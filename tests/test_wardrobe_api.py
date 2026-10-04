@@ -73,6 +73,17 @@ def test_catalog_failure_returns_a_recoverable_error(monkeypatch: pytest.MonkeyP
     async def failed_analysis(*args: object, **kwargs: object) -> list:
         raise CatalogImageError("private provider failure")
 
+    class Scans:
+        def __init__(self, *args):
+            pass
+
+        async def claim(self, *args):
+            return {"status": "claimed", "lease_token": "lease"}
+
+        async def fail(self, *args):
+            pass
+
+    monkeypatch.setattr(wardrobe_api, "SupabaseScans", Scans)
     monkeypatch.setattr(wardrobe_api, "analyze", failed_analysis)
     monkeypatch.setattr(
         app.state,

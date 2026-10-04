@@ -128,6 +128,8 @@ async def analyze(
                 label == signature and _similar(previous, fingerprint) for label, previous in seen
             ):
                 continue
+            if len(candidates) >= 8:
+                return candidates
             seen.append((signature, fingerprint))
             crop_bytes = _jpeg(crop)
             try:

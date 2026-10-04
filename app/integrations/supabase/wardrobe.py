@@ -1,12 +1,17 @@
 import base64
 import io
+import json
 import logging
+from datetime import datetime
+from uuid import UUID
 
 import httpx
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.core.config import Settings
+from app.domains.outfits.schemas import OutfitFailure
 from app.domains.wardrobe.schemas import CreateItem, UpdateItem, WardrobeItem
+from app.integrations.supabase.outfits import SupabaseOutfits
 
 
 class SupabaseWardrobe:
@@ -29,7 +34,18 @@ class SupabaseWardrobe:
         )
         if response.status_code != 200:
             return None
-        return response.json().get("id")
+        identity = response.json().get("id")
+        if identity:
+            deletion = await self.client.get(
+                f"{self.settings.supabase_url}/rest/v1/account_deletions",
+                headers=self._headers,
+                params={"user_id": "eq." + identity, "select": "user_id", "limit": 1},
+                timeout=10,
+            )
+            deletion.raise_for_status()
+            if deletion.json():
+                return None
+        return identity
 
     async def _signed_url(self, path: str) -> str | None:
         response = await self.client.post(
@@ -89,7 +105,7 @@ class SupabaseWardrobe:
         storage_url = f"{self.settings.supabase_url}/storage/v1/object/wardrobe-items/{path}"
         upload = await self.client.post(
             storage_url,
-            headers={**self._headers, "Content-Type": item.image_mime},
+            headers={**self._headers, "Content-Type": item.image_mime, "x-upsert": "true"},
             content=image,
             timeout=20,
         )
@@ -114,8 +130,7 @@ class SupabaseWardrobe:
             json=row,
             timeout=15,
         )
-        if response.is_error:
-            await self.client.delete(storage_url, headers=self._headers, timeout=10)
+        # A lost insert response may already be committed; never delete its image here.
         response.raise_for_status()
         rows = response.json()
         if not rows:
@@ -154,7 +169,56 @@ class SupabaseWardrobe:
             timeout=15,
         )
         response.raise_for_status()
-        return [await self._item(row) for row in response.json()]
+        return await self._items(response.json())
+
+    async def _items(self, rows):
+        images = await SupabaseOutfits(self.client, self.settings)._signed_images(
+            [r["image_path"] for r in rows]
+        )
+        return [
+            WardrobeItem.model_validate({**r, "image_url": images.get(r["image_path"])})
+            for r in rows
+        ]
+
+    async def page(self, user_id, limit, cursor):
+        params = {
+            "user_id": "eq." + user_id,
+            "select": "*",
+            "order": "created_at.desc,id.desc",
+            "limit": limit + 1,
+        }
+        if cursor:
+            try:
+                values = json.loads(base64.urlsafe_b64decode(cursor + "=" * (-len(cursor) % 4)))
+                stamp = datetime.fromisoformat(values["created_at"])
+                if stamp.tzinfo is None:
+                    raise ValueError("Timezone required")
+                identity = str(UUID(values["id"]))
+                timestamp = stamp.isoformat()
+            except (ValueError, TypeError, KeyError):
+                raise OutfitFailure("invalid_cursor") from None
+            params["or"] = (
+                f"(created_at.lt.{timestamp},and(created_at.eq.{timestamp},id.lt.{identity}))"
+            )
+        response = await self.client.get(
+            f"{self.settings.supabase_url}/rest/v1/wardrobe_items",
+            headers=self._headers,
+            params=params,
+            timeout=15,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        next_cursor = None
+        if len(rows) > limit:
+            last = rows[limit - 1]
+            next_cursor = (
+                base64.urlsafe_b64encode(
+                    json.dumps({"id": last["id"], "created_at": last["created_at"]}).encode()
+                )
+                .decode()
+                .rstrip("=")
+            )
+        return await self._items(rows[:limit]), next_cursor
 
     async def update(self, user_id: str, item_id: str, item: UpdateItem) -> WardrobeItem | None:
         response = await self.client.patch(

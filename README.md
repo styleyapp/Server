@@ -156,8 +156,8 @@ access and cannot mutate outfit tables or execute the write RPCs.
 
 Outfit image URLs are batch signed for one hour. Refresh collection/detail
 reads to renew them; image signing outages preserve metadata and use placeholders.
-Unsaved generation cleanup, cross-restart draft recovery, broader wardrobe
-selection/pagination, and quotas for scan calls remain production-readiness work.
+Task 3 adds unsaved-generation retention, scan recovery and wardrobe pagination;
+see the recovery and maintenance instructions below.
 
 `supabase/tests/outfits.sql` tests migration constraints, leases, quotas,
 idempotency, garment deletion, owner isolation, denied client writes/RPCs, and
@@ -176,3 +176,80 @@ Deployed Cloud Run API endpoints also passed against live Supabase/Vertex AI usi
 disposable accounts: replay/conflicts, saves, pagination, account isolation,
 edits, and deletion races. All fixtures were removed. These checks do not
 replace native-device verification or controlled-beta fashion-quality review.
+
+
+## Recovery and controlled beta (Task 3)
+
+Scan clients send a UUID `X-Request-ID` to `POST /v1/wardrobe/analyze`.
+Identical retries replay the private result rather than calling paid providers again;
+changed content conflicts. One scan per account runs at a time, with six new scans
+per hour, 24 per day, and three attempts per request. Each attempt has an eight-minute
+lease; stale workers cannot publish over a newer lease. Media limits are 10 MiB for
+photos and 30 MiB for videos, up to twelve sampled frames and eight catalog cutouts.
+Provider work is bounded to 390 seconds. Garment saves have a 60-second budget and
+retain candidate identity on retries. Failed scans require an explicit retry; closing
+the App does not guarantee an unfinished scan completes. Completed scan results
+can be resumed for 24 hours through `GET /v1/wardrobe/scans/latest`.
+
+`GET /v1/wardrobe/items?limit=50&cursor=...` returns the existing item array and
+an optional `X-Next-Cursor` header. Cursors use stable creation-time/ID ordering.
+Native clients can read both response headers directly. Web deployments must set
+`ALLOWED_WEB_ORIGINS` to the explicit allowed origins; CORS exposes the cursor and
+trace headers. The empty default enables no cross-origin browser access.
+
+`GET /v1/outfits/requests/{request_id}` restores an owner-scoped generation by its
+request identity. The App stores only request metadata in per-account secure
+storage, clears it on save/reset/sign-out, and makes no automatic paid retry at launch.
+Unsaved outfits expire from the database after seven days; saved outfits remain.
+
+`DELETE /v1/me/account` requires a valid session and `{"confirmation":"DELETE"}`.
+It accepts an idempotent deletion request (202), blocks ordinary API and direct client
+wardrobe access immediately, and allows in-flight leases eight minutes to finish.
+The private maintenance worker removes wardrobe/scan storage files before deleting
+the auth user and its cascading owned records. Jobs survive auth deletion and retry
+partial failures fairly. Completed outbox entries are retained for 30 days. Provider
+retention and backups follow their own policies; the in-app disclosure is not a
+substitute for a reviewed public privacy-policy URL required for store submission.
+
+### Activate maintenance after deploying the Task 3 image
+
+Deploy the new Server image first, then run this from the Server root:
+
+```sh
+PYTHONPATH=. python scripts/configure_maintenance.py
+```
+
+This configures a private Cloud Run Job from the deployed image and secrets, invoked
+by an authenticated Cloud Scheduler job every 15 minutes. The job uses bounded batches
+and retries, expires 24-hour scan files/rows and seven-day unsaved outfits, and removes
+unreferenced wardrobe images older than 24 hours. **Deletion cleanup and retention
+require this scheduled worker; deploying the service alone does not activate it.**
+The configuration script is idempotent. Check the job execution and scheduler status
+before distributing the App. Pending deletion jobs and retention ages must be monitored.
+
+Request logs contain only a generated trace ID, route template, method, status and
+elapsed time. Uvicorn access logs are disabled to avoid URL/query data. JSON and
+multipart request sizes are bounded before parsing, including streamed bodies.
+
+### Verification and release gates
+
+Server CI checks formatting/lint, API regressions and all migrations/role tests against
+a fresh Postgres 17 database. The deployment script also runs Server checks locally.
+App CI checks analysis/tests and a release web build using a pinned revision of the
+public DesignSystem repository; no cross-repository secret is needed.
+Require successful checks in GitHub branch protection before merging to `main` so the
+connected Cloud Run deployment cannot bypass verification. Branch protection and the
+maintenance scheduler are rollout configuration, not enabled by these source changes.
+
+```sh
+PYTHONPATH=. python scripts/verify_beta_recovery.py --live
+```
+
+This opt-in test creates disposable accounts and uses synthetic paid-provider responses
+against live Supabase Auth, database and private Storage. It verifies scan replay/recovery,
+wardrobe save retries/pagination, outfit recovery/save/reopen, account isolation, deletion
+blocking and the cleanup worker. It filters maintenance to its own fixtures and removes
+those fixtures. If interrupted, complete cleanup using the protected state file reported
+by the script before rerunning. It does not validate the deployed Cloud Run revision or
+real provider output quality. Task 2 already passed deployed real-AI tests; Task 3 still
+requires deployed endpoint verification and native iOS/Android interrupted/reopen checks.

@@ -3,6 +3,7 @@
 import argparse
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -40,6 +41,10 @@ def exists(*args: str) -> bool:
 
 
 def main(*, reuse_secrets: bool = False) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "app", "tests", "scripts"], cwd=ROOT, check=True
+    )
+    subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=ROOT, check=True)
     settings = dotenv_values(ROOT / ".env")
     required = ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", *SECRETS)
     missing = [name for name in required if not settings.get(name)]
@@ -136,12 +141,13 @@ def main(*, reuse_secrets: bool = False) -> None:
             "--quiet",
         )
 
-    public_env = ",".join(
+    public_env = "^|^" + "|".join(
         (
             f"SUPABASE_URL={settings['SUPABASE_URL']}",
             f"SUPABASE_PUBLISHABLE_KEY={settings['SUPABASE_PUBLISHABLE_KEY']}",
             f"GOOGLE_CLOUD_PROJECT={PROJECT}",
             "GOOGLE_CLOUD_LOCATION=global",
+            f"ALLOWED_WEB_ORIGINS={settings.get('ALLOWED_WEB_ORIGINS', '')}",
         )
     )
     secret_env = ",".join(
@@ -164,7 +170,7 @@ def main(*, reuse_secrets: bool = False) -> None:
         "--concurrency=4",
         "--max-instances=2",
         "--min-instances=0",
-        "--timeout=300s",
+        "--timeout=600s",
         "--quiet",
     )
 
