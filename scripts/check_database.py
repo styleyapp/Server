@@ -17,6 +17,8 @@ create schema storage;
 create table storage.buckets(id text primary key,name text,public boolean,
  file_size_limit bigint,allowed_mime_types text[]);
 create table storage.objects(bucket_id text,name text,created_at timestamptz default now());
+grant usage on schema storage to service_role;
+grant select on storage.objects to service_role;
 create function storage.foldername(text) returns text[] language sql immutable as
  'select string_to_array($1,''/'')';
 """

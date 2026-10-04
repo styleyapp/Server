@@ -230,8 +230,8 @@ def test_one_cleanup_failure_does_not_starve_other_accounts():
             return httpx.Response(
                 200, json=[{"user_id": first, "attempts": 0}, {"user_id": second, "attempts": 0}]
             )
-        if req.url.path.startswith("/storage/v1/object/list/"):
-            if json.loads(req.content)["prefix"] == first:
+        if req.url.path == "/rest/v1/rpc/account_storage_paths":
+            if json.loads(req.content)["p_user"] == first:
                 return httpx.Response(503)
             return httpx.Response(200, json=[])
         if req.url.path.startswith("/auth/v1/admin/users/"):
@@ -251,3 +251,49 @@ def test_one_cleanup_failure_does_not_starve_other_accounts():
 
     asyncio.run(check())
     assert deleted == [second]
+
+
+def test_cleanup_removes_nested_paths_and_refuses_foreign_owners():
+    owner = str(uuid4())
+    removed = []
+    calls = 0
+
+    def handler(req):
+        nonlocal calls
+        if req.url.path == "/rest/v1/rpc/account_storage_paths":
+            calls += 1
+            return httpx.Response(
+                200, json=[{"name": owner + "/older/nested/image.png"}] if calls == 1 else []
+            )
+        removed.extend(json.loads(req.content)["prefixes"])
+        return httpx.Response(200, json=[])
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            store = SupabaseLifecycle(
+                client,
+                SimpleNamespace(
+                    supabase_url="https://supabase.test", supabase_secret_key="service"
+                ),
+            )
+            assert await store.clear_prefix("wardrobe-items", owner)
+
+    asyncio.run(check())
+    assert removed == [owner + "/older/nested/image.png"]
+
+    async def foreign():
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(200, json=[{"name": "other/private.png"}])
+            )
+        ) as client:
+            store = SupabaseLifecycle(
+                client,
+                SimpleNamespace(
+                    supabase_url="https://supabase.test", supabase_secret_key="service"
+                ),
+            )
+            with pytest.raises(ValueError, match="owner"):
+                await store.clear_prefix("wardrobe-items", owner)
+
+    asyncio.run(foreign())

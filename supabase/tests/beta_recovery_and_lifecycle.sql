@@ -35,6 +35,7 @@ do $$ declare result jsonb; old_lease uuid; begin
  result=public.claim_scan('00000000-0000-0000-0000-000000000071',gen_random_uuid(),repeat('a',64));
  assert result->>'status'='rate_limited';
  assert not has_function_privilege('authenticated','public.orphaned_wardrobe_images()','execute');
+ assert not has_function_privilege('authenticated','public.account_storage_paths(uuid,text)','execute');
  insert into public.account_deletions(user_id) values('00000000-0000-0000-0000-000000000071');
  result=public.claim_scan('00000000-0000-0000-0000-000000000071','10000000-0000-0000-0000-000000000072',repeat('a',64));
  assert result->>'status'='unauthorized';

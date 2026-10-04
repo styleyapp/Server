@@ -150,3 +150,34 @@ def test_failed_background_removal_returns_no_white_preview() -> None:
                 background_remover=Remover(),
             )
         )
+
+
+def test_large_scan_caps_paid_cutouts_and_fits_private_recovery_budget():
+    import random
+
+    from app.domains.wardrobe.schemas import AnalysisResponse
+
+    output = io.BytesIO()
+    Image.frombytes("RGBA", (1024, 1024), random.Random(0).randbytes(1024 * 1024 * 4)).save(
+        output, format="PNG"
+    )
+
+    class ManyGarments(FakeGemini):
+        calls = 0
+
+        async def detect_garments(self, image):
+            template = (await super().detect_garments(image))[0]
+            return [{**template, "color": f"different-{number}"} for number in range(20)]
+
+        async def create_catalog_image(self, image, name):
+            self.calls += 1
+            return output.getvalue()
+
+    provider = ManyGarments()
+    candidates = asyncio.run(
+        analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=provider)
+    )
+    assert len(candidates) == 8
+    assert provider.calls == 8
+    assert all(len(base64.b64decode(c.image_base64)) <= 2_000_000 for c in candidates)
+    assert len(AnalysisResponse(candidates=candidates).model_dump_json().encode()) < 24_000_000

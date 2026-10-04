@@ -222,7 +222,8 @@ PYTHONPATH=. python scripts/configure_maintenance.py
 This configures a private Cloud Run Job from the deployed image and secrets, invoked
 by an authenticated Cloud Scheduler job every 15 minutes. The job uses bounded batches
 and retries, expires 24-hour scan files/rows and seven-day unsaved outfits, and removes
-unreferenced wardrobe images older than 24 hours. **Deletion cleanup and retention
+images older than 24 hours left behind by missing accounts. Active-account files
+are kept until removal/account cleanup to avoid races with save retries. **Deletion cleanup and retention
 require this scheduled worker; deploying the service alone does not activate it.**
 The configuration script is idempotent. Check the job execution and scheduler status
 before distributing the App. Pending deletion jobs and retention ages must be monitored.

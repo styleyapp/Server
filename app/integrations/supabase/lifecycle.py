@@ -36,26 +36,35 @@ class SupabaseLifecycle(SupabaseScans):
 
     async def clear_prefix(self, bucket, prefix, search=None):
         for _ in range(20):
-            rows = (
-                await self.request(
-                    "POST",
-                    f"/storage/v1/object/list/{bucket}",
-                    json={
-                        "prefix": prefix,
-                        "limit": 100,
-                        "offset": 0,
-                        **({"search": search} if search else {}),
-                    },
-                )
-            ).json()
-            if not rows:
+            if search is None:
+                rows = (
+                    await self.request(
+                        "POST",
+                        "/rest/v1/rpc/account_storage_paths",
+                        json={"p_user": str(UUID(prefix)), "p_bucket": bucket},
+                    )
+                ).json()
+                paths = [row["name"] for row in rows]
+                if any(
+                    not isinstance(path, str) or not path.startswith(prefix + "/") for path in paths
+                ):
+                    raise ValueError("Unexpected storage owner")
+            else:
+                rows = (
+                    await self.request(
+                        "POST",
+                        f"/storage/v1/object/list/{bucket}",
+                        json={"prefix": prefix, "limit": 100, "offset": 0, "search": search},
+                    )
+                ).json()
+                paths = []
+                for row in rows:
+                    name = row.get("name")
+                    if not isinstance(name, str) or "/" in name or not row.get("id"):
+                        raise ValueError("Unexpected storage layout")
+                    paths.append(prefix + "/" + name)
+            if not paths:
                 return True
-            paths = []
-            for row in rows:
-                name = row.get("name")
-                if not isinstance(name, str) or "/" in name or not row.get("id"):
-                    raise ValueError("Unexpected storage layout")
-                paths.append(prefix + "/" + name)
             await self.request("DELETE", f"/storage/v1/object/{bucket}", json={"prefixes": paths})
         return False  # Continue the same job on the next maintenance run.
 

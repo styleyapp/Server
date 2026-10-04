@@ -213,6 +213,15 @@ async def main():
                     await api.get("/v1/outfits", headers=tokens[0]), 200, "Reopen saved collection"
                 )
                 assert saved["items"][0]["id"] == outfit["id"]
+                nested = users[0] + "/legacy/nested-test.png"
+                paths.append(nested)
+                record()
+                r = await real.post(
+                    settings.supabase_url + "/storage/v1/object/wardrobe-items/" + nested,
+                    headers={**admin, "Content-Type": "image/png"},
+                    content=image.getvalue(),
+                )
+                r.raise_for_status()
                 for _ in range(2):
                     check(
                         await api.request(

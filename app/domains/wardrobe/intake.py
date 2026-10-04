@@ -142,12 +142,12 @@ async def analyze(
                 output = io.BytesIO()
                 clean_image.save(output, format="PNG", optimize=True)
                 preview = output.getvalue()
-                if len(preview) > 2_800_000:
-                    clean_image.thumbnail((768, 768))
+                if len(preview) > 2_000_000:
+                    clean_image.thumbnail((640, 640))
                     output = io.BytesIO()
                     clean_image.save(output, format="PNG", optimize=True)
                     preview = output.getvalue()
-                    if len(preview) > 2_800_000:
+                    if len(preview) > 2_000_000:
                         raise ValueError("Catalog cutout exceeds preview limit")
             except Exception as error:
                 # Review must never silently substitute the original photographed crop.
@@ -190,6 +190,6 @@ async def analyze(
                     source="video" if is_video else "photo",
                 )
             )
-            if len(candidates) >= 20:
+            if len(candidates) >= 8:
                 return candidates
     return candidates
