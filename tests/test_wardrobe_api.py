@@ -125,6 +125,27 @@ def test_delete_is_authenticated_and_idempotent() -> None:
     assert asyncio.run(_request("DELETE", "/v1/wardrobe/items/item", "valid")).status_code == 204
 
 
+def test_analysis_diagnostics_exclude_private_provider_data(caplog) -> None:
+    upstream = httpx.Request(
+        "POST",
+        "https://api.replicate.com/v1/predictions?token=private-query",
+        headers={"Authorization": "Bearer private-token"},
+        content=b"private-photo",
+    )
+    response = httpx.Response(402, request=upstream, text="private-provider-body")
+    cause = httpx.HTTPStatusError("private-provider-message", request=upstream, response=response)
+    failure = CatalogImageError("private-garment-label")
+    failure.__cause__ = cause
+    request = SimpleNamespace(state=SimpleNamespace(trace_id="diagnostic-trace"))
+
+    wardrobe_api._log_analysis_failure(request, failure)
+
+    assert "trace_id=diagnostic-trace" in caplog.text
+    assert "provider=replicate status=402" in caplog.text
+    assert "cause_type=HTTPStatusError" in caplog.text
+    assert "private-" not in caplog.text
+
+
 def test_favorite_of_non_owned_item_returns_not_found() -> None:
     app.dependency_overrides[repository] = lambda: FakeWardrobe()
 

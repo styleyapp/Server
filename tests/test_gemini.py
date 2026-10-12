@@ -29,7 +29,16 @@ def test_garment_detection_uses_structured_vertex_output() -> None:
         assert "hebrew" in schema["required"]
         assert "tags" in schema["properties"]["hebrew"]["required"]
         assert "length" in schema["required"]
+        # Vertex rejects an empty enum option with INVALID_ARGUMENT before analysis.
+        assert all(schema["properties"]["length"]["enum"])
+        assert "unknown" in schema["properties"]["length"]["enum"]
         assert "natural Hebrew" in body["contents"][0]["parts"][0]["text"]
+        prompt = body["contents"][0]["parts"][0]["text"]
+        for item_type in ("shoes", "handbag", "sunglasses", "belt", "hat"):
+            assert item_type in prompt
+        assert "matching pair of shoes as one item" in prompt
+        assert "category Accessories" in prompt
+        assert "not applicable, including shoes and accessories" in prompt
         assert body["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 0
         assert (
             body["contents"][0]["parts"][1]["inlineData"]["data"]
@@ -73,7 +82,8 @@ def test_garment_detection_rejects_malformed_provider_output() -> None:
         asyncio.run(run())
 
 
-def test_catalog_garment_uses_vertex_ai_with_cloud_credentials() -> None:
+@pytest.mark.parametrize("name", ["hoodie", "shoes", "handbag", "sunglasses", "belt", "hat"])
+def test_catalog_garment_uses_vertex_ai_with_cloud_credentials(name: str) -> None:
     edited = b"edited-image"
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -96,6 +106,9 @@ def test_catalog_garment_uses_vertex_ai_with_cloud_credentials() -> None:
         assert "quilting or pleats" in prompt
         assert "logos, lettering" in prompt
         assert "pure white background" in prompt
+        assert "do not reshape it as clothing" in prompt
+        assert "never invent a missing shoe" in prompt
+        assert json.dumps({"garment": name}) in prompt
         return httpx.Response(
             200,
             json={
@@ -119,6 +132,6 @@ def test_catalog_garment_uses_vertex_ai_with_cloud_credentials() -> None:
                 "styley-project",
                 credentials_factory=lambda: Credentials(token="test-token"),
             )
-            return await gemini.create_catalog_image(b"source", "hoodie")
+            return await gemini.create_catalog_image(b"source", name)
 
     assert asyncio.run(run()) == edited

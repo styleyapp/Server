@@ -78,6 +78,66 @@ def test_worn_garment_uses_gemini_image_editing() -> None:
 
 
 @pytest.mark.parametrize("worn", [False, True])
+def test_mixed_accessories_preserve_categories_and_bilingual_labels(worn: bool) -> None:
+    labels = [
+        ("Shoes", "Shoes", "נעליים"),
+        ("Accessories", "Handbag", "תיק יד"),
+        ("Accessories", "Sunglasses", "משקפי שמש"),
+        ("Accessories", "Belt", "חגורה"),
+        ("Accessories", "Hat", "כובע"),
+    ]
+
+    class AccessoriesGemini(FakeGemini):
+        catalog_names = []
+
+        async def detect_garments(self, image: bytes) -> list[dict]:
+            template = (await super().detect_garments(image))[0]
+            return [
+                {
+                    **template,
+                    "name": item_type,
+                    "category": category,
+                    "type": item_type,
+                    "length": "unknown",
+                    "hebrew": {
+                        **template["hebrew"],
+                        "name": hebrew_type,
+                        "category": "נעליים" if category == "Shoes" else "אביזרים",
+                        "type": hebrew_type,
+                    },
+                }
+                for category, item_type, hebrew_type in labels
+            ]
+
+        async def create_catalog_image(self, image: bytes, name: str) -> bytes:
+            self.catalog_names.append(name)
+            return await super().create_catalog_image(image, "Blue hoodie")
+
+    provider = AccessoriesGemini(worn)
+    candidates = asyncio.run(
+        analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=provider)
+    )
+    assert [(item.category, item.type, item.hebrew.name) for item in candidates] == labels
+    assert provider.catalog_names == [item_type for _, item_type, _ in labels]
+    assert all(item.length == "" and item.image_mime == "image/png" for item in candidates)
+    assert len({item.id for item in candidates}) == 5
+
+
+def test_unknown_provider_length_preserves_the_public_empty_length() -> None:
+    class UnknownLengthGemini(FakeGemini):
+        async def detect_garments(self, image: bytes) -> list[dict]:
+            items = await super().detect_garments(image)
+            items[0]["length"] = "unknown"
+            return items
+
+    candidates = asyncio.run(
+        analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=UnknownLengthGemini())
+    )
+    assert len(candidates) == 1
+    assert candidates[0].length == ""
+
+
+@pytest.mark.parametrize("worn", [False, True])
 def test_review_image_is_generated_rather_than_the_source_crop(worn: bool) -> None:
     candidates = asyncio.run(
         analyze(_source(), is_video=False, ffmpeg_binary="ffmpeg", gemini=FakeGemini(worn))

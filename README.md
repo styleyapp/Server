@@ -14,6 +14,8 @@ Gemini 2.5 Flash on Vertex AI detects up to eight garments in each sampled frame
 
 Flat, hanging, crumpled, and worn garments all use the same catalog generation path before review. Bria on Replicate removes the background from the generated catalog photograph. Review and saved PNGs preserve alpha transparency, including white garment fabric. Background removal failure returns a recoverable error instead of substituting the white image. If generation fails or returns an unreadable image, analysis returns a recoverable 502 error so the App can offer retry; it never silently substitutes the photographed crop. Successful candidate previews are the same images submitted when the user saves selected pieces.
 
+Scanning includes clothing, shoes, handbags, sunglasses, belts, and hats (including caps). Shoes use the `Shoes` category; the other new items use `Accessories` with types `Handbag`, `Sunglasses`, `Belt`, or `Hat`, matching the App's existing filters. A visible matching shoe pair is requested as one candidate. Length is unknown when not applicable. Catalog generation preserves accessory construction instead of applying clothing reshaping. The existing eight-candidate limit still applies. These prompt changes require deployment and live photo evaluation before recognition quality can be confirmed.
+
 Ximilar is no longer part of the wardrobe intake path. Google Cloud Application Default Credentials are still needed to run Gemini locally or on the deployed server.
 
 ## API contract
@@ -254,3 +256,14 @@ those fixtures. If interrupted, complete cleanup using the protected state file 
 by the script before rerunning. It does not validate the deployed Cloud Run revision or
 real provider output quality. Task 2 already passed deployed real-AI tests; Task 3 still
 requires deployed endpoint verification and native iOS/Android interrupted/reopen checks.
+
+Scan navigation recovery: authenticated `GET /v1/wardrobe/scans/latest/status`
+returns `null` for missing, expired, pending, or failed scans; a finished scan
+returns only `request_id` (UUID) and `expires_at` (UTC timestamp). It is marked
+`Cache-Control: no-store` and does not download private scan images. Clients may
+pass `request_id` to `GET /v1/wardrobe/scans/latest` to recover exactly the scan
+selected, even if a newer scan finishes meanwhile. Both reads enforce ownership
+and the existing 24-hour retention. The App stores only the last reviewed request
+ID per account in secure device storage, suppressing the notification after a
+successful review. Deploy the Server before the App; older servers safely omit
+the notification. No database migration is required.

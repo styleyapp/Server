@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from app.api.dependencies import repository
 from app.api.outfits import outfit_preferences, outfit_proposer, outfit_repository
-from app.domains.outfits.generation import generate
+from app.domains.outfits.generation import generate, supported_slots
 from app.domains.outfits.schemas import GenerateOutfit, OutfitFailure, OutfitProposal
 from app.integrations.ai.gemini import Gemini
 from app.integrations.supabase.outfits import SupabaseOutfits
@@ -28,6 +28,21 @@ PROPOSAL = {
     "reason_he": "שילוב",
     "pieces": [{"slot": "top", "garment_id": FIRST}, {"slot": "bottom", "garment_id": SECOND}],
 }
+
+
+@pytest.mark.parametrize(
+    ("item_type", "slot"),
+    [
+        ("Shoes", "shoes"),
+        ("Handbags", "accessory"),
+        ("Sunglasses", "accessory"),
+        ("Belts", "accessory"),
+        ("Hats", "accessory"),
+        ("Caps", "accessory"),
+    ],
+)
+def test_scanned_accessory_types_have_explicit_outfit_roles(item_type, slot):
+    assert supported_slots({"category": "", "type": item_type}) == {slot}
 
 
 class Store:

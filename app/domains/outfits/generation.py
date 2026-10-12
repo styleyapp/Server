@@ -88,6 +88,21 @@ def supported_slots(row: dict) -> set[str]:
         "one_piece": {"dress", "dresses", "jumpsuit", "romper", "gown"},
         "outerwear": {"outerwear", "coat", "jacket", "blazer", "overshirt", "cardigan"},
         "shoes": {"shoes", "footwear", "sneakers", "boots", "sandals", "loafers"},
-        "accessory": {"accessory", "accessories", "hat", "belt", "scarf", "bag"},
+        "accessory": {
+            "accessory",
+            "accessories",
+            "hat",
+            "hats",
+            "cap",
+            "caps",
+            "belt",
+            "belts",
+            "scarf",
+            "bag",
+            "bags",
+            "handbag",
+            "handbags",
+            "sunglasses",
+        },
     }
     return {slot for slot, names in vocabulary.items() if words & names}

@@ -297,3 +297,70 @@ def test_cleanup_removes_nested_paths_and_refuses_foreign_owners():
                 await store.clear_prefix("wardrobe-items", owner)
 
     asyncio.run(foreign())
+
+
+@pytest.mark.parametrize("state", ["ready", "pending", "failed", "missing"])
+def test_scan_badge_reads_only_owned_metadata(monkeypatch, state):
+    identity = str(uuid4())
+    calls = []
+
+    class Scans:
+        def __init__(self, *_):
+            pass
+
+        async def row(self, user):
+            calls.append(user)
+            if state == "missing":
+                raise OutfitFailure("not_found")
+            return {
+                "state": state,
+                "request_id": identity,
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "lease_token": "private-not-in-response",
+            }
+
+    app.dependency_overrides[repository] = Owner
+    monkeypatch.setattr(wardrobe, "SupabaseScans", Scans)
+    denied = asyncio.run(request("GET", "/v1/wardrobe/scans/latest/status"))
+    assert denied.status_code == 401 and calls == []
+    response = asyncio.run(
+        request(
+            "GET", "/v1/wardrobe/scans/latest/status", headers={"Authorization": "Bearer valid"}
+        )
+    )
+    assert response.status_code == 200 and calls == ["owner"]
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == (
+        {"request_id": identity, "expires_at": "2099-01-01T00:00:00Z"} if state == "ready" else None
+    )
+
+
+def test_recovery_pins_the_scan_selected_before_a_new_scan_finishes(monkeypatch):
+    identity = str(uuid4())
+
+    class Scans:
+        def __init__(self, *_):
+            pass
+
+        async def recover(self, user, selected):
+            assert user == "owner" and str(selected) == identity
+            return AnalysisResponse(candidates=[])
+
+    app.dependency_overrides[repository] = Owner
+    monkeypatch.setattr(wardrobe, "SupabaseScans", Scans)
+    response = asyncio.run(
+        request(
+            "GET",
+            "/v1/wardrobe/scans/latest?request_id=" + identity,
+            headers={"Authorization": "Bearer valid"},
+        )
+    )
+    assert response.status_code == 200
+    invalid = asyncio.run(
+        request(
+            "GET",
+            "/v1/wardrobe/scans/latest?request_id=bad",
+            headers={"Authorization": "Bearer valid"},
+        )
+    )
+    assert invalid.status_code == 422
