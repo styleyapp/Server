@@ -1,3 +1,6 @@
+import json
+import logging
+import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
@@ -6,10 +9,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.api.account import router as account_router
 from app.api.outfits import router as outfits_router
 from app.api.preferences import router as preferences_router
 from app.api.wardrobe import router as wardrobe_router
 from app.core.config import Settings
+from app.core.request_limits import ConfiguredCORS, RequestLimits
 from app.domains.outfits.schemas import OutfitFailure
 
 
@@ -21,16 +26,41 @@ async def lifespan(app: FastAPI):
         yield
 
 
+request_logger = logging.getLogger("styley.requests")
+request_logger.setLevel(logging.INFO)
+if not request_logger.handlers:
+    request_logger.addHandler(logging.StreamHandler())
+request_logger.propagate = False
+
 app = FastAPI(title="Styley Server", lifespan=lifespan)
+app.add_middleware(RequestLimits)
+app.add_middleware(ConfiguredCORS)
 app.include_router(wardrobe_router)
 app.include_router(preferences_router)
 app.include_router(outfits_router)
+app.include_router(account_router)
 
 
 @app.middleware("http")
 async def trace_request(request: Request, call_next):
     request.state.trace_id = str(uuid4())
-    response = await call_next(request)
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        response = _error(request, "server_error", "Please try again later", 500)
+    route = request.scope.get("route")
+    request_logger.info(
+        json.dumps(
+            {
+                "trace_id": request.state.trace_id,
+                "route": getattr(route, "path", "unmatched"),
+                "method": request.method,
+                "status": response.status_code,
+                "duration_ms": round((time.monotonic() - started) * 1000),
+            }
+        )
+    )
     response.headers["X-Trace-ID"] = request.state.trace_id
     return response
 
@@ -79,6 +109,8 @@ async def health() -> dict[str, str]:
 @app.exception_handler(OutfitFailure)
 async def outfit_error(request: Request, error: OutfitFailure) -> JSONResponse:
     messages = {
+        "expired": (410, "This scan has expired; choose your media again"),
+        "unauthorized": (401, "Sign in required"),
         "conflict": (409, "This request was already used for different choices"),
         "generation_in_progress": (409, "An outfit is still being prepared; try again shortly"),
         "rate_limited": (429, "Please wait before creating another outfit"),

@@ -120,6 +120,23 @@ class SupabaseOutfits:
             raise OutfitFailure(row.get("failure_code") or "generation_in_progress")
         return (await self._hydrate(user, rows))[0]
 
+    async def get_request(self, user, request_id):
+        rows = (
+            await self._request(
+                "GET",
+                "outfits",
+                params={
+                    "user_id": "eq." + user,
+                    "request_id": "eq." + str(request_id),
+                    "select": "id",
+                    "limit": 1,
+                },
+            )
+        ).json()
+        if not rows:
+            raise OutfitFailure("not_found")
+        return await self.get(user, rows[0]["id"])
+
     async def list_saved(self, user: str, limit: int, cursor: str | None) -> OutfitPage:
         params = {
             "user_id": f"eq.{user}",

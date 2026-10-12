@@ -14,6 +14,8 @@ Gemini 2.5 Flash on Vertex AI detects up to eight garments in each sampled frame
 
 Flat, hanging, crumpled, and worn garments all use the same catalog generation path before review. Bria on Replicate removes the background from the generated catalog photograph. Review and saved PNGs preserve alpha transparency, including white garment fabric. Background removal failure returns a recoverable error instead of substituting the white image. If generation fails or returns an unreadable image, analysis returns a recoverable 502 error so the App can offer retry; it never silently substitutes the photographed crop. Successful candidate previews are the same images submitted when the user saves selected pieces.
 
+Scanning includes clothing, shoes, handbags, sunglasses, belts, and hats (including caps). Shoes use the `Shoes` category; the other new items use `Accessories` with types `Handbag`, `Sunglasses`, `Belt`, or `Hat`, matching the App's existing filters. A visible matching shoe pair is requested as one candidate. Length is unknown when not applicable. Catalog generation preserves accessory construction instead of applying clothing reshaping. The existing eight-candidate limit still applies. These prompt changes require deployment and live photo evaluation before recognition quality can be confirmed.
+
 Ximilar is no longer part of the wardrobe intake path. Google Cloud Application Default Credentials are still needed to run Gemini locally or on the deployed server.
 
 ## API contract
@@ -118,8 +120,9 @@ Migration filenames match the versions recorded in the Styley database.
 ### Persistent owned outfits
 
 The additive migration `supabase/migrations/20261004063336_persistent_outfits.sql`
-is applied to Styley. New outfit code must be deployed before shipping the App.
-The old wardrobe and preferences contracts remain compatible. Rolling back the
+is applied to Styley. Outfit code is deployed and passed authenticated live
+verification on October 4, 2026. The updated App still needs native-device
+verification before release. The old wardrobe and preferences contracts remain compatible. Rolling back the
 new API/App code can retain the additive tables; do not drop saved user data.
 
 | Route | Body | Result |
@@ -155,8 +158,8 @@ access and cannot mutate outfit tables or execute the write RPCs.
 
 Outfit image URLs are batch signed for one hour. Refresh collection/detail
 reads to renew them; image signing outages preserve metadata and use placeholders.
-Unsaved generation cleanup, cross-restart draft recovery, broader wardrobe
-selection/pagination, and quotas for scan calls remain production-readiness work.
+Task 3 adds unsaved-generation retention, scan recovery and wardrobe pagination;
+see the recovery and maintenance instructions below.
 
 `supabase/tests/outfits.sql` tests migration constraints, leases, quotas,
 idempotency, garment deletion, owner isolation, denied client writes/RPCs, and
@@ -171,7 +174,96 @@ PYTHONPATH=. python scripts/evaluate_outfits.py --live
 The evaluation is opt-in and makes four billed Vertex AI calls against
 synthetic casual separates, a single dress, an incomplete closet, and hostile
 metadata. It does not write to the database. All four passed on October 4.
-New local API endpoints also passed against live Supabase/Vertex AI using two
+Deployed Cloud Run API endpoints also passed against live Supabase/Vertex AI using two
 disposable accounts: replay/conflicts, saves, pagination, account isolation,
 edits, and deletion races. All fixtures were removed. These checks do not
-replace deployed-route verification or controlled-beta fashion-quality review.
+replace native-device verification or controlled-beta fashion-quality review.
+
+
+## Recovery and controlled beta (Task 3)
+
+Scan clients send a UUID `X-Request-ID` to `POST /v1/wardrobe/analyze`.
+Identical retries replay the private result rather than calling paid providers again;
+changed content conflicts. One scan per account runs at a time, with six new scans
+per hour, 24 per day, and three attempts per request. Each attempt has an eight-minute
+lease; stale workers cannot publish over a newer lease. Media limits are 10 MiB for
+photos and 30 MiB for videos, up to twelve sampled frames and eight catalog cutouts.
+Provider work is bounded to 390 seconds. Garment saves have a 60-second budget and
+retain candidate identity on retries. Failed scans require an explicit retry; closing
+the App does not guarantee an unfinished scan completes. Completed scan results
+can be resumed for 24 hours through `GET /v1/wardrobe/scans/latest`.
+
+`GET /v1/wardrobe/items?limit=50&cursor=...` returns the existing item array and
+an optional `X-Next-Cursor` header. Cursors use stable creation-time/ID ordering.
+Native clients can read both response headers directly. Web deployments must set
+`ALLOWED_WEB_ORIGINS` to the explicit allowed origins; CORS exposes the cursor and
+trace headers. The empty default enables no cross-origin browser access.
+
+`GET /v1/outfits/requests/{request_id}` restores an owner-scoped generation by its
+request identity. The App stores only request metadata in per-account secure
+storage, clears it on save/reset/sign-out, and makes no automatic paid retry at launch.
+Unsaved outfits expire from the database after seven days; saved outfits remain.
+
+`DELETE /v1/me/account` requires a valid session and `{"confirmation":"DELETE"}`.
+It accepts an idempotent deletion request (202), blocks ordinary API and direct client
+wardrobe access immediately, and allows in-flight leases eight minutes to finish.
+The private maintenance worker removes wardrobe/scan storage files before deleting
+the auth user and its cascading owned records. Jobs survive auth deletion and retry
+partial failures fairly. Completed outbox entries are retained for 30 days. Provider
+retention and backups follow their own policies; the in-app disclosure is not a
+substitute for a reviewed public privacy-policy URL required for store submission.
+
+### Activate maintenance after deploying the Task 3 image
+
+Deploy the new Server image first, then run this from the Server root:
+
+```sh
+PYTHONPATH=. python scripts/configure_maintenance.py
+```
+
+This configures a private Cloud Run Job from the deployed image and secrets, invoked
+by an authenticated Cloud Scheduler job every 15 minutes. The job uses bounded batches
+and retries, expires 24-hour scan files/rows and seven-day unsaved outfits, and removes
+images older than 24 hours left behind by missing accounts. Active-account files
+are kept until removal/account cleanup to avoid races with save retries. **Deletion cleanup and retention
+require this scheduled worker; deploying the service alone does not activate it.**
+The configuration script is idempotent. Check the job execution and scheduler status
+before distributing the App. Pending deletion jobs and retention ages must be monitored.
+
+Request logs contain only a generated trace ID, route template, method, status and
+elapsed time. Uvicorn access logs are disabled to avoid URL/query data. JSON and
+multipart request sizes are bounded before parsing, including streamed bodies.
+
+### Verification and release gates
+
+Server CI checks formatting/lint, API regressions and all migrations/role tests against
+a fresh Postgres 17 database. The deployment script also runs Server checks locally.
+App CI checks analysis/tests and a release web build using a pinned revision of the
+public DesignSystem repository; no cross-repository secret is needed.
+Require successful checks in GitHub branch protection before merging to `main` so the
+connected Cloud Run deployment cannot bypass verification. Branch protection and the
+maintenance scheduler are rollout configuration, not enabled by these source changes.
+
+```sh
+PYTHONPATH=. python scripts/verify_beta_recovery.py --live
+```
+
+This opt-in test creates disposable accounts and uses synthetic paid-provider responses
+against live Supabase Auth, database and private Storage. It verifies scan replay/recovery,
+wardrobe save retries/pagination, outfit recovery/save/reopen, account isolation, deletion
+blocking and the cleanup worker. It filters maintenance to its own fixtures and removes
+those fixtures. If interrupted, complete cleanup using the protected state file reported
+by the script before rerunning. It does not validate the deployed Cloud Run revision or
+real provider output quality. Task 2 already passed deployed real-AI tests; Task 3 still
+requires deployed endpoint verification and native iOS/Android interrupted/reopen checks.
+
+Scan navigation recovery: authenticated `GET /v1/wardrobe/scans/latest/status`
+returns `null` for missing, expired, pending, or failed scans; a finished scan
+returns only `request_id` (UUID) and `expires_at` (UTC timestamp). It is marked
+`Cache-Control: no-store` and does not download private scan images. Clients may
+pass `request_id` to `GET /v1/wardrobe/scans/latest` to recover exactly the scan
+selected, even if a newer scan finishes meanwhile. Both reads enforce ownership
+and the existing 24-hour retention. The App stores only the last reviewed request
+ID per account in secure device storage, suppressing the notification after a
+successful review. Deploy the Server before the App; older servers safely omit
+the notification. No database migration is required.

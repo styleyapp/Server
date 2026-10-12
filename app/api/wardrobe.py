@@ -1,23 +1,53 @@
+import asyncio
+import logging
 import subprocess
 from typing import Annotated
+from uuid import UUID, uuid4
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Query, Request, Response, UploadFile
 from google.auth.exceptions import GoogleAuthError
 
 from app.api.dependencies import Owner, Repository, owner, repository  # noqa: F401
+from app.domains.outfits.schemas import OutfitFailure
 from app.domains.wardrobe.intake import CatalogImageError, analyze
 from app.domains.wardrobe.schemas import (
     AnalysisResponse,
     CreateItem,
     FavoriteUpdate,
+    ScanAvailability,
     UpdateItem,
     WardrobeItem,
 )
 from app.integrations.ai.bria import Bria
 from app.integrations.ai.gemini import Gemini
+from app.integrations.supabase.scans import SupabaseScans
 
 router = APIRouter(prefix="/v1/wardrobe", tags=["wardrobe"])
+logger = logging.getLogger(__name__)
+
+
+def _log_analysis_failure(request: Request, error: Exception) -> None:
+    # Never log exception messages, media, credentials, or full provider URLs.
+    cause = error
+    while cause.__cause__ is not None:
+        cause = cause.__cause__
+    status = cause.response.status_code if isinstance(cause, httpx.HTTPStatusError) else None
+    provider = "unknown"
+    if isinstance(cause, httpx.HTTPStatusError):
+        host = cause.request.url.host
+        if host.endswith("aiplatform.googleapis.com"):
+            provider = "vertex_ai"
+        elif host in {"api.replicate.com", "replicate.delivery"}:
+            provider = "replicate"
+    logger.warning(
+        "Wardrobe analysis failed trace_id=%s error_type=%s cause_type=%s provider=%s status=%s",
+        request.state.trace_id,
+        type(error).__name__,
+        type(cause).__name__,
+        provider,
+        status,
+    )
 
 
 @router.post("/analyze", response_model=AnalysisResponse)
@@ -25,6 +55,7 @@ async def analyze_media(
     request: Request,
     file: Annotated[UploadFile, File()],
     _user_id: Owner,
+    request_id: Annotated[UUID | None, Header(alias="X-Request-ID")] = None,
 ) -> AnalysisResponse:
     mime = file.content_type or ""
     if mime not in (
@@ -43,30 +74,54 @@ async def analyze_media(
         raise HTTPException(status_code=413, detail="File is too large")
     settings = request.app.state.settings
     client: httpx.AsyncClient = request.app.state.http
+    scans = SupabaseScans(client, settings)
+    identity = request_id or uuid4()
+    claim = await scans.claim(_user_id, identity, content)
+    if claim["status"] == "ready":
+        return await scans.recover(_user_id, identity)
+    if claim["status"] != "claimed":
+        raise OutfitFailure(claim["status"])
+    lease = claim["lease_token"]
     try:
-        candidates = await analyze(
-            content,
-            is_video=video,
-            ffmpeg_binary=settings.ffmpeg_binary,
-            gemini=Gemini(
-                client,
-                settings.google_cloud_project,
-                settings.google_cloud_location,
-            ),
-            background_remover=Bria(client, settings.replicate_api_token),
-        )
+        async with asyncio.timeout(390):
+            candidates = await analyze(
+                content,
+                is_video=video,
+                ffmpeg_binary=settings.ffmpeg_binary,
+                gemini=Gemini(
+                    client,
+                    settings.google_cloud_project,
+                    settings.google_cloud_location,
+                ),
+                background_remover=Bria(client, settings.replicate_api_token),
+            )
     except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        await scans.fail(_user_id, identity, lease)
         raise HTTPException(status_code=422, detail="This media could not be read") from error
-    except (httpx.HTTPError, GoogleAuthError, CatalogImageError) as error:
+    except (httpx.HTTPError, GoogleAuthError, CatalogImageError, TimeoutError) as error:
+        _log_analysis_failure(request, error)
+        await scans.fail(_user_id, identity, lease)
         raise HTTPException(
             status_code=502, detail="Clothing analysis is temporarily unavailable"
         ) from error
-    return AnalysisResponse(candidates=candidates)
+    return await scans.finish(_user_id, identity, lease, AnalysisResponse(candidates=candidates))
 
 
 @router.get("/items", response_model=list[WardrobeItem])
-async def list_items(user_id: Owner, repo: Repository) -> list[WardrobeItem]:
-    return await repo.list_items(user_id)
+async def list_items(
+    user_id: Owner,
+    repo: Repository,
+    response: Response,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    cursor: Annotated[str | None, Query(max_length=512)] = None,
+) -> list[WardrobeItem]:
+    if limit == 100 and cursor is None:
+        # Preserve the dependency boundary for older adapters and clients.
+        return await repo.list_items(user_id)
+    items, next_cursor = await repo.page(user_id, limit, cursor)
+    if next_cursor:
+        response.headers["X-Next-Cursor"] = next_cursor
+    return items
 
 
 @router.post("/items", response_model=WardrobeItem, status_code=201)
@@ -76,7 +131,8 @@ async def create_item(
     repo: Repository,
 ) -> WardrobeItem:
     try:
-        return await repo.create(user_id, item)
+        async with asyncio.timeout(60):
+            return await repo.create(user_id, item)
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Invalid item image") from error
 
@@ -109,3 +165,28 @@ async def delete_item(item_id: str, user_id: Owner, repo: Repository) -> Respons
     # Idempotent: retries after a lost response are successful too.
     await repo.delete(user_id, item_id)
     return Response(status_code=204)
+
+
+@router.get("/scans/latest", response_model=AnalysisResponse)
+async def recover_scan(
+    request: Request, user_id: Owner, request_id: UUID | None = None
+) -> AnalysisResponse:
+    return await SupabaseScans(request.app.state.http, request.app.state.settings).recover(
+        user_id, request_id
+    )
+
+
+@router.get("/scans/latest/status", response_model=ScanAvailability | None)
+async def scan_availability(request: Request, response: Response, user_id: Owner):
+    # Metadata only: checking the navigation badge must never download cutout images.
+    response.headers["Cache-Control"] = "no-store"
+    store = SupabaseScans(request.app.state.http, request.app.state.settings)
+    try:
+        row = await store.row(user_id)
+    except OutfitFailure as error:
+        if error.code == "not_found":
+            return None
+        raise
+    if row["state"] != "ready":
+        return None
+    return ScanAvailability(request_id=row["request_id"], expires_at=row["expires_at"])

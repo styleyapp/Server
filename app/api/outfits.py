@@ -62,3 +62,8 @@ async def get_outfit(outfit_id: UUID, user: Owner, store: Store) -> Outfit:
 @router.put("/{outfit_id}/save", response_model=Outfit)
 async def save_outfit(outfit_id: UUID, user: Owner, store: Store) -> Outfit:
     return await store.save(user, outfit_id)
+
+
+@router.get("/requests/{request_id}", response_model=Outfit)
+async def recover_outfit(request_id: UUID, user: Owner, store: Store) -> Outfit:
+    return await store.get_request(user, request_id)

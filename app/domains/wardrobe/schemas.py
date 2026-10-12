@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
@@ -32,6 +33,11 @@ class Candidate(GarmentMetadata):
 
 class AnalysisResponse(BaseModel):
     candidates: list[Candidate]
+
+
+class ScanAvailability(BaseModel):
+    request_id: UUID
+    expires_at: datetime
 
 
 class CreateItem(GarmentMetadata):

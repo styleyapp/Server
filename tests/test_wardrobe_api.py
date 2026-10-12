@@ -73,6 +73,17 @@ def test_catalog_failure_returns_a_recoverable_error(monkeypatch: pytest.MonkeyP
     async def failed_analysis(*args: object, **kwargs: object) -> list:
         raise CatalogImageError("private provider failure")
 
+    class Scans:
+        def __init__(self, *args):
+            pass
+
+        async def claim(self, *args):
+            return {"status": "claimed", "lease_token": "lease"}
+
+        async def fail(self, *args):
+            pass
+
+    monkeypatch.setattr(wardrobe_api, "SupabaseScans", Scans)
     monkeypatch.setattr(wardrobe_api, "analyze", failed_analysis)
     monkeypatch.setattr(
         app.state,
@@ -112,6 +123,27 @@ def test_delete_is_authenticated_and_idempotent() -> None:
     assert asyncio.run(_request("DELETE", "/v1/wardrobe/items/item")).status_code == 401
     assert asyncio.run(_request("DELETE", "/v1/wardrobe/items/item", "valid")).status_code == 204
     assert asyncio.run(_request("DELETE", "/v1/wardrobe/items/item", "valid")).status_code == 204
+
+
+def test_analysis_diagnostics_exclude_private_provider_data(caplog) -> None:
+    upstream = httpx.Request(
+        "POST",
+        "https://api.replicate.com/v1/predictions?token=private-query",
+        headers={"Authorization": "Bearer private-token"},
+        content=b"private-photo",
+    )
+    response = httpx.Response(402, request=upstream, text="private-provider-body")
+    cause = httpx.HTTPStatusError("private-provider-message", request=upstream, response=response)
+    failure = CatalogImageError("private-garment-label")
+    failure.__cause__ = cause
+    request = SimpleNamespace(state=SimpleNamespace(trace_id="diagnostic-trace"))
+
+    wardrobe_api._log_analysis_failure(request, failure)
+
+    assert "trace_id=diagnostic-trace" in caplog.text
+    assert "provider=replicate status=402" in caplog.text
+    assert "cause_type=HTTPStatusError" in caplog.text
+    assert "private-" not in caplog.text
 
 
 def test_favorite_of_non_owned_item_returns_not_found() -> None:

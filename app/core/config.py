@@ -14,6 +14,7 @@ class Settings:
     replicate_api_token: str = ""
     google_cloud_location: str = "global"
     ffmpeg_binary: str = "ffmpeg"
+    allowed_web_origins: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -35,4 +36,7 @@ class Settings:
             replicate_api_token=environ.get("REPLICATE_API_TOKEN", ""),
             google_cloud_location=environ.get("GOOGLE_CLOUD_LOCATION", "global"),
             ffmpeg_binary=environ.get("FFMPEG_BINARY", "ffmpeg"),
+            allowed_web_origins=tuple(
+                v.strip() for v in environ.get("ALLOWED_WEB_ORIGINS", "").split(",") if v.strip()
+            ),
         )
